@@ -8,8 +8,8 @@
 
 pkgbase=nautilus-with-terminal
 pkgname=nautilus-with-terminal
-pkgver=48.1+git
-pkgrel=3
+pkgver=48.1-git
+pkgrel=4
 conflicts=('nautilus')
 provides=('nautilus')
 pkgdesc="Default file manager for GNOME"
