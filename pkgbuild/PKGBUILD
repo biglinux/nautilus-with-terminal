@@ -9,7 +9,7 @@
 pkgbase=nautilus-with-terminal
 pkgname=nautilus-with-terminal
 pkgver=48.1
-pkgrel=1
+pkgrel=2
 conflicts=('nautilus')
 provides=('nautilus')
 pkgdesc="Default file manager for GNOME"

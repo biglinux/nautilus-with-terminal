@@ -1,8 +1,8 @@
 From a1bbdd956294f4638f1597d2b68b4b4553a098b7 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Bruno=20Gon=C3=A7alves?= <bigbruno@gmail.com>
 Date: Mon, 28 Apr 2025 23:30:47 -0300
-Subject: [PATCH] This commit introduces an embedded terminal feature into the
- Nautilus window slot using the VTE GTK4 library.
+Subject: [PATCH 1/2] This commit introduces an embedded terminal feature into
+ the Nautilus window slot using the VTE GTK4 library.
 
 Key changes:
 - Added vte as a dependency.
@@ -1366,6 +1366,62 @@ index 7c494ec36..e7d1414a9 100644
  
 -void free_navigation_state                                 (gpointer data);
 +void free_navigation_state (gpointer data);
+-- 
+2.49.0
+
+
+From 65a519c233f6ad922ac3aa281c044effdbe312a4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bruno=20Gon=C3=A7alves?= <bigbruno@gmail.com>
+Date: Tue, 29 Apr 2025 15:01:10 -0300
+Subject: [PATCH 2/2] Improved monospace detection
+
+---
+ src/nautilus-terminal-widget.c | 25 +++++++++++++++++++++++--
+ 1 file changed, 23 insertions(+), 2 deletions(-)
+
+diff --git a/src/nautilus-terminal-widget.c b/src/nautilus-terminal-widget.c
+index 6d0eacc45..89472fa37 100644
+--- a/src/nautilus-terminal-widget.c
++++ b/src/nautilus-terminal-widget.c
+@@ -341,8 +341,6 @@ nautilus_terminal_widget_init (NautilusTerminalWidget *self)
+     GtkEventController *key_controller;
+     GtkGesture *click_gesture;
+ 
+-    /* Initialize focus maintenance to enabled by default
+-     * This ensures terminal maintains focus when directory changes are initiated from the terminal */
+     self->maintain_focus = TRUE;
+ 
+     self->box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+@@ -357,6 +355,29 @@ nautilus_terminal_widget_init (NautilusTerminalWidget *self)
+     vte_terminal_set_scrollback_lines (VTE_TERMINAL (self->terminal), 10000);
+     vte_terminal_set_allow_hyperlink (VTE_TERMINAL (self->terminal), TRUE);
+ 
++    /* Get system monospace font settings from GTK4 */
++    GSettings *interface_settings = g_settings_new ("org.gnome.desktop.interface");
++    gchar *font_name = g_settings_get_string (interface_settings, "monospace-font-name");
++
++    /* Create font description from the system settings */
++    PangoFontDescription *font_desc = NULL;
++    if (font_name != NULL && font_name[0] != '\0')
++    {
++        font_desc = pango_font_description_from_string (font_name);
++        g_free (font_name);
++    }
++
++    /* Fallback to default if no system font was found */
++    if (font_desc == NULL)
++    {
++        font_desc = pango_font_description_from_string ("Monospace 12");
++    }
++
++    /* Apply the font to the terminal */
++    vte_terminal_set_font (VTE_TERMINAL (self->terminal), font_desc);
++    pango_font_description_free (font_desc);
++    g_object_unref (interface_settings);
++
+     /* Handle terminal exit */
+     g_signal_connect (self->terminal, "child-exited",
+                       G_CALLBACK (on_terminal_child_exited), self);
 -- 
 2.49.0
 
