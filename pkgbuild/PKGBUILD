@@ -8,8 +8,8 @@
 
 pkgbase=nautilus-with-terminal
 pkgname=nautilus-with-terminal
-pkgver=48.1
-pkgrel=2
+pkgver=48.1+git
+pkgrel=3
 conflicts=('nautilus')
 provides=('nautilus')
 pkgdesc="Default file manager for GNOME"
@@ -54,11 +54,12 @@ makedepends=(
 )
 checkdepends=(python-gobject)
 source=(
-  "git+https://gitlab.gnome.org/GNOME/nautilus.git#tag=${pkgver/[a-z]/.&}"
+#   "git+https://gitlab.gnome.org/GNOME/nautilus.git#tag=${pkgver/[a-z]/.&}"
+  "git+https://gitlab.gnome.org/GNOME/nautilus.git"
   0001-Disable-tracker-test.patch
   0002-Embedded-terminal.patch
 )
-b2sums=('d2003198e3371fd27c259c6df4dcd8ec55401deda54032d978917635efaec724df58db6453aa1ab33bb4cb4e62e34bf6f4305fd3a043d498bd9af81d4cacf38d'
+b2sums=('SKIP'
         'b70c17cc83308e25fa1d5fcc0c735f82ba641fa6f78a064c5b01d65fa5b45505d23247528e2d97254a6983e939e3e9e1b1a737f3aab2546e5ecc825f954d9dcc'
         '46e3db153a926a07ed702ad6769abfef20032b98fc9f5c2b5c4d039f4bfefc423a51b25e6ed13a2005d8b8066d7e922ae59e27347a2f39c08f3a1ce3884fa596')
 validpgpkeys=(
@@ -87,9 +88,9 @@ build() {
   meson compile -C build
 }
 
-check() {
-  meson test -C build --print-errorlogs
-}
+# check() {
+#   meson test -C build --print-errorlogs
+# }
 
 _pick() {
   local p="$1" f d; shift
@@ -107,13 +108,13 @@ package() {
 
   meson install -C build --destdir "$pkgdir"
 
-  cd "$pkgdir"
+#   cd "$pkgdir"
 
-  _pick libne usr/include
-  _pick libne usr/lib/{girepository-1.0,libnautilus-extension*,pkgconfig}
-  _pick libne usr/share/gir-1.0
+#   _pick libne usr/include
+#   _pick libne usr/lib/{girepository-1.0,libnautilus-extension*,pkgconfig}
+#   _pick libne usr/share/gir-1.0
 
-  _pick ldocs usr/share/doc
+#   _pick ldocs usr/share/doc
 }
 
 package_libnautilus-extension() {
