@@ -1,0 +1,1371 @@
+From a1bbdd956294f4638f1597d2b68b4b4553a098b7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bruno=20Gon=C3=A7alves?= <bigbruno@gmail.com>
+Date: Mon, 28 Apr 2025 23:30:47 -0300
+Subject: [PATCH] This commit introduces an embedded terminal feature into the
+ Nautilus window slot using the VTE GTK4 library.
+
+Key changes:
+- Added vte as a dependency.
+- Created a new NautilusTerminalWidget (implementation not included in this diff, but files are added to meson).
+- Refactored NautilusWindowSlot layout to use a GtkPaned (vertical), placing the terminal in the bottom pane.
+- Added a toggle-terminal stateful GAction, triggered by the F4 key, to show/hide the terminal.
+- The terminal is lazily instantiated when first shown and starts in the slot current location.
+- Implemented two-way directory synchronization:
+    - Changing directory via the terminal change-directory signal updates the Nautilus slots location.
+    - Changing the Nautilus slots location property updates the terminals current directory.
+- Added focus handling:
+    - Terminal grabs focus when shown via F4 or pane visibility change.
+    - Content view regains focus when terminal is hidden.
+    - Focus is managed during directory changes initiated from either Nautilus or the terminal to provide a smooth user experience.
+---
+ build-aux/flatpak/org.gnome.Nautilus.json |  49 ++
+ meson.build                               |   1 +
+ po/POTFILES.in                            |   1 +
+ src/meson.build                           |   3 +
+ src/nautilus-terminal-widget.c            | 699 ++++++++++++++++++++++
+ src/nautilus-terminal-widget.h            |  45 ++
+ src/nautilus-window-slot.c                | 196 +++++-
+ src/nautilus-window-slot.h                | 142 ++---
+ 8 files changed, 1061 insertions(+), 75 deletions(-)
+ create mode 100644 src/nautilus-terminal-widget.c
+ create mode 100644 src/nautilus-terminal-widget.h
+
+diff --git a/build-aux/flatpak/org.gnome.Nautilus.json b/build-aux/flatpak/org.gnome.Nautilus.json
+index a1bf994d0..ac7a0a019 100644
+--- a/build-aux/flatpak/org.gnome.Nautilus.json
++++ b/build-aux/flatpak/org.gnome.Nautilus.json
+@@ -173,6 +173,55 @@
+         }
+       ]
+     },
++    {
++        "name": "simdutf",
++        "buildsystem": "cmake-ninja",
++        "config-opts": [
++            "-DCMAKE_INSTALL_PREFIX=/app",
++            "-DCMAKE_INSTALL_LIBDIR=/app/lib",
++            "-DSIMDUTF_BUILD_STATIC=OFF"
++        ],
++        "sources": [
++            {
++                "type": "git",
++                "url": "https://github.com/simdutf/simdutf.git",
++                "branch": "master"
++            }
++        ]
++    },
++    {
++        "name": "fast_float",
++        "buildsystem": "cmake-ninja",
++        "config-opts": [
++            "-DCMAKE_INSTALL_PREFIX=/app",
++            "-DCMAKE_INSTALL_LIBDIR=/app/lib"
++        ],
++        "sources": [
++            {
++                "type": "git",
++                "url": "https://github.com/fastfloat/fast_float.git",
++                "tag": "main"
++            }
++        ]
++    },
++    {
++        "name": "vte",
++        "buildsystem": "meson",
++        "config-opts": [
++            "--libdir=/app/lib",
++            "-Dglade=false",
++            "-Dgtk3=false",
++            "-Dgtk4=true",
++            "-Dvapi=false"
++        ],
++        "sources": [
++            {
++                "type": "git",
++                "url": "https://gitlab.gnome.org/GNOME/vte.git",
++                "branch": "master"
++            }
++        ]
++    },
+     {
+       "buildsystem": "meson",
+       "run-tests": true,
+diff --git a/meson.build b/meson.build
+index a7030b2b3..0da75ba72 100644
+--- a/meson.build
++++ b/meson.build
+@@ -116,6 +116,7 @@ gnome_desktop = dependency('gnome-desktop-4', version: '>= 43')
+ gtk = dependency('gtk4', version: '>= 4.17.5')
+ gtk_x11 = dependency('gtk4-x11', required: false)
+ gtk_wayland = dependency('gtk4-wayland', required: false)
++vte = dependency('vte-2.91-gtk4', version: '>= 0.70.0')
+ if gtk_wayland.found()
+   dependency('wayland-client')
+ endif
+diff --git a/po/POTFILES.in b/po/POTFILES.in
+index 63699c316..e1e461442 100644
+--- a/po/POTFILES.in
++++ b/po/POTFILES.in
+@@ -66,6 +66,7 @@ src/nautilus-search-engine.c
+ src/nautilus-search-popover.c
+ src/nautilus-shell-search-provider.c
+ src/nautilus-star-cell.c
++src/nautilus-terminal-widget.c
+ src/nautilus-toolbar.c
+ src/nautilus-ui-utilities.c
+ src/nautilus-vfs-file.c
+diff --git a/src/meson.build b/src/meson.build
+index a1bb61c62..6320903fd 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -148,6 +148,8 @@ libnautilus_sources = [
+   'nautilus-view-model.h',
+   'nautilus-window-slot.c',
+   'nautilus-window-slot.h',
++  'nautilus-terminal-widget.c',
++  'nautilus-terminal-widget.h',
+   'nautilus-window.c',
+   'nautilus-window.h',
+   'nautilus-x-content-bar.c',
+@@ -302,6 +304,7 @@ nautilus_deps = [
+   tracker_sparql,
+   xdp_gnome,
+   cloudproviders,
++  vte,
+ ]
+ 
+ libnautilus = static_library(
+diff --git a/src/nautilus-terminal-widget.c b/src/nautilus-terminal-widget.c
+new file mode 100644
+index 000000000..6d0eacc45
+--- /dev/null
++++ b/src/nautilus-terminal-widget.c
+@@ -0,0 +1,699 @@
++/*
++ *  Copyright (C) 2025
++ *
++ *  This program is free software; you can redistribute it and/or
++ *  modify it under the terms of the GNU General Public License as
++ *  published by the Free Software Foundation; either version 2 of the
++ *  License, or (at your option) any later version.
++ *
++ *  This program is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ *  General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public
++ *  License along with this program; if not, see <http://www.gnu.org/licenses/>.
++ *
++ *  Author: Bruno Goncalves <biglinux.com.br>
++ */
++
++#include "nautilus-terminal-widget.h"
++
++#include <glib/gi18n.h>
++#include <vte/vte.h>
++
++struct _NautilusTerminalWidget
++{
++    GtkWidget parent_instance;
++
++    GtkWidget *terminal;
++    GtkWidget *box;
++    GFile *current_location;
++    gboolean maintain_focus;
++    guint focus_timeout_id;
++    gulong location_changed_id;
++    gboolean needs_respawn;
++};
++
++
++static gboolean on_terminal_button_press (GtkGestureClick *gesture,
++                                          int              n_press,
++                                          double           x,
++                                          double           y,
++                                          gpointer         user_data);
++static void on_terminal_directory_changed (VteTerminal *terminal,
++                                           gpointer     user_data);
++static gboolean focus_once_and_remove (gpointer user_data);
++
++enum
++{
++    PROP_0,
++    PROP_CURRENT_LOCATION,
++    N_PROPS
++};
++
++static GParamSpec *properties[N_PROPS];
++
++enum
++{
++    CHANGE_DIRECTORY,
++    TOGGLE_VISIBILITY,
++    LAST_SIGNAL
++};
++
++static guint signals[LAST_SIGNAL];
++
++G_DEFINE_TYPE (NautilusTerminalWidget, nautilus_terminal_widget, GTK_TYPE_WIDGET)
++
++static void
++nautilus_terminal_widget_finalize (GObject *object)
++{
++    NautilusTerminalWidget *self = NAUTILUS_TERMINAL_WIDGET (object);
++
++    g_clear_object (&self->current_location);
++
++    G_OBJECT_CLASS (nautilus_terminal_widget_parent_class)->finalize (object);
++}
++
++static void
++change_directory_in_terminal (NautilusTerminalWidget *self,
++                              GFile                  *location)
++{
++    char *path;
++    char *quoted_path;
++    char *change_dir_command;
++
++    path = g_file_get_path (location);
++    if (path == NULL)
++    {
++        return;
++    }
++
++    quoted_path = g_shell_quote (path);
++    change_dir_command = g_strdup_printf ("cd %s\n", quoted_path);
++
++    vte_terminal_feed_child (VTE_TERMINAL (self->terminal), change_dir_command, -1);
++
++    g_free (path);
++    g_free (quoted_path);
++    g_free (change_dir_command);
++}
++
++static void
++on_terminal_child_exited (VteTerminal *terminal,
++                          gint         status,
++                          gpointer     user_data)
++{
++    NautilusTerminalWidget *self = NAUTILUS_TERMINAL_WIDGET (user_data);
++
++    /* Signal visibility change */
++    g_signal_emit (self, signals[TOGGLE_VISIBILITY], 0, FALSE);
++
++    /* Instead of just setting a flag, schedule an immediate respawn */
++    g_timeout_add_once (100, (GSourceOnceFunc) spawn_terminal_in_widget, self);
++}
++
++static void
++nautilus_terminal_widget_set_property (GObject      *object,
++                                       guint         prop_id,
++                                       const GValue *value,
++                                       GParamSpec   *pspec)
++{
++    NautilusTerminalWidget *self = NAUTILUS_TERMINAL_WIDGET (object);
++
++    switch (prop_id)
++    {
++        case PROP_CURRENT_LOCATION:
++        {
++            nautilus_terminal_widget_set_current_location (self, g_value_get_object (value));
++            break;
++        }
++
++        default:
++        {
++            G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++        }
++    }
++}
++
++static void
++nautilus_terminal_widget_get_property (GObject    *object,
++                                       guint       prop_id,
++                                       GValue     *value,
++                                       GParamSpec *pspec)
++{
++    NautilusTerminalWidget *self = NAUTILUS_TERMINAL_WIDGET (object);
++
++    switch (prop_id)
++    {
++        case PROP_CURRENT_LOCATION:
++        {
++            g_value_set_object (value, self->current_location);
++            break;
++        }
++
++        default:
++        {
++            G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
++        }
++    }
++}
++
++static void
++nautilus_terminal_widget_class_init (NautilusTerminalWidgetClass *klass)
++{
++    GObjectClass *object_class = G_OBJECT_CLASS (klass);
++    GtkWidgetClass *widget_class = GTK_WIDGET_CLASS (klass);
++
++    object_class->finalize = nautilus_terminal_widget_finalize;
++    object_class->set_property = nautilus_terminal_widget_set_property;
++    object_class->get_property = nautilus_terminal_widget_get_property;
++
++    properties[PROP_CURRENT_LOCATION] =
++        g_param_spec_object ("current-location",
++                             "Current location",
++                             "The current location displayed in the terminal",
++                             G_TYPE_FILE,
++                             G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
++
++    g_object_class_install_properties (object_class, N_PROPS, properties);
++
++    signals[CHANGE_DIRECTORY] =
++        g_signal_new ("change-directory",
++                      G_TYPE_FROM_CLASS (klass),
++                      G_SIGNAL_RUN_LAST,
++                      0, NULL, NULL,
++                      g_cclosure_marshal_VOID__OBJECT,
++                      G_TYPE_NONE, 1, G_TYPE_FILE);
++
++    signals[TOGGLE_VISIBILITY] =
++        g_signal_new ("toggle-visibility",
++                      G_TYPE_FROM_CLASS (klass),
++                      G_SIGNAL_RUN_LAST,
++                      0, NULL, NULL,
++                      g_cclosure_marshal_VOID__BOOLEAN,
++                      G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
++
++    gtk_widget_class_set_layout_manager_type (widget_class, GTK_TYPE_BIN_LAYOUT);
++}
++
++static gboolean
++terminal_key_press_cb (GtkEventControllerKey *controller,
++                       guint                  keyval,
++                       guint                  keycode,
++                       GdkModifierType        state,
++                       gpointer               user_data)
++{
++    NautilusTerminalWidget *self = NAUTILUS_TERMINAL_WIDGET (user_data);
++
++    /* Copy: Ctrl+Shift+C */
++    if ((state & GDK_CONTROL_MASK) && (state & GDK_SHIFT_MASK) && keyval == GDK_KEY_c)
++    {
++        vte_terminal_copy_clipboard_format (VTE_TERMINAL (self->terminal), VTE_FORMAT_TEXT);
++        return TRUE;
++    }    /* Toggle terminal visibility with F4 */
++    if (keyval == GDK_KEY_F4)
++    {
++        /* Toggle visibility of parent terminal pane */
++        GtkWidget *parent = gtk_widget_get_parent (GTK_WIDGET (self));
++        gboolean visible = gtk_widget_get_visible (parent);
++        gboolean new_visible = !visible;
++
++        /* First, emit signal to notify the slot of the visibility change */
++        g_signal_emit (self, signals[TOGGLE_VISIBILITY], 0, new_visible);
++
++        /* Use our custom function to handle visibility and respawning */
++        nautilus_terminal_widget_set_visible (self, new_visible);
++
++        /* If making the terminal visible, ensure it gets focus */
++        if (new_visible)
++        {
++            nautilus_terminal_widget_ensure_terminal_focus (self);
++        }
++
++        return TRUE;
++    }
++
++    /* Paste: Ctrl+Shift+V */
++    if ((state & GDK_CONTROL_MASK) && (state & GDK_SHIFT_MASK) && keyval == GDK_KEY_v)
++    {
++        vte_terminal_paste_clipboard (VTE_TERMINAL (self->terminal));
++        return TRUE;
++    }
++
++    /* Select all: Ctrl+Shift+A */
++    if ((state & GDK_CONTROL_MASK) && (state & GDK_SHIFT_MASK) && keyval == GDK_KEY_a)
++    {
++        vte_terminal_select_all (VTE_TERMINAL (self->terminal));
++        return TRUE;
++    }
++
++    /* Increase font size: Ctrl++ */
++    if ((state & GDK_CONTROL_MASK) && keyval == GDK_KEY_plus)
++    {
++        double scale = vte_terminal_get_font_scale (VTE_TERMINAL (self->terminal));
++        vte_terminal_set_font_scale (VTE_TERMINAL (self->terminal), scale + 0.1);
++        return TRUE;
++    }
++
++    /* Decrease font size: Ctrl+- */
++    if ((state & GDK_CONTROL_MASK) && keyval == GDK_KEY_minus)
++    {
++        double scale = vte_terminal_get_font_scale (VTE_TERMINAL (self->terminal));
++        if (scale > 0.2) /* Prevent font from becoming too small */
++        {
++            vte_terminal_set_font_scale (VTE_TERMINAL (self->terminal), scale - 0.1);
++        }
++        return TRUE;
++    }
++
++    return FALSE;
++}
++
++static gboolean
++focus_once_and_remove (gpointer user_data)
++{
++    GtkWidget *widget = GTK_WIDGET (user_data);
++    NautilusTerminalWidget *self;
++
++    /* Grab focus once */
++    gtk_widget_grab_focus (widget);
++
++    /* Find the parent NautilusTerminalWidget to clear timeout ID */
++    self = NAUTILUS_TERMINAL_WIDGET (gtk_widget_get_ancestor (widget, NAUTILUS_TYPE_TERMINAL_WIDGET));
++    if (self != NULL)
++    {
++        self->focus_timeout_id = 0;
++    }
++
++    /* Return FALSE to remove this timeout source */
++    return G_SOURCE_REMOVE;
++}
++
++static void
++on_terminal_directory_changed (VteTerminal *terminal,
++                               gpointer     user_data)
++{
++    NautilusTerminalWidget *self = NAUTILUS_TERMINAL_WIDGET (user_data);
++    const char *cwd = vte_terminal_get_current_directory_uri (terminal);
++    GFile *directory = NULL;
++    GtkWidget *term_widget;
++
++    if (cwd != NULL)
++    {
++        directory = g_file_new_for_uri (cwd);
++        if (directory != NULL &&
++            (self->current_location == NULL || !g_file_equal (directory, self->current_location)))
++        {
++            /* Remember the terminal widget for potential focus management */
++            term_widget = GTK_WIDGET (self->terminal);
++
++            /* Update our internal tracking */
++            g_set_object (&self->current_location, directory);
++
++            /* Signal the directory change to Nautilus */
++            g_signal_emit (self, signals[CHANGE_DIRECTORY], 0, directory);
++
++            /* Only grab focus if terminal had focus before the directory change */
++            if (self->maintain_focus && gtk_widget_has_focus (term_widget))
++            {
++                /* Cancel any previous focus timeout to prevent focus stealing loops */
++                if (self->focus_timeout_id > 0)
++                {
++                    g_source_remove (self->focus_timeout_id);
++                    self->focus_timeout_id = 0;
++                }
++
++                /* Set up a one-time focus grab with a short delay */
++                self->focus_timeout_id = g_timeout_add (50, focus_once_and_remove, term_widget);
++            }
++        }
++        if (directory)
++        {
++            g_object_unref (directory);
++        }
++    }
++}
++
++static void
++nautilus_terminal_widget_init (NautilusTerminalWidget *self)
++{
++    GtkEventController *key_controller;
++    GtkGesture *click_gesture;
++
++    /* Initialize focus maintenance to enabled by default
++     * This ensures terminal maintains focus when directory changes are initiated from the terminal */
++    self->maintain_focus = TRUE;
++
++    self->box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
++    gtk_widget_set_parent (self->box, GTK_WIDGET (self));
++
++    /* Create terminal widget */
++    self->terminal = vte_terminal_new ();
++
++    /* Set terminal properties */
++    vte_terminal_set_bold_is_bright (VTE_TERMINAL (self->terminal), TRUE);
++    vte_terminal_set_enable_sixel (VTE_TERMINAL (self->terminal), TRUE);
++    vte_terminal_set_scrollback_lines (VTE_TERMINAL (self->terminal), 10000);
++    vte_terminal_set_allow_hyperlink (VTE_TERMINAL (self->terminal), TRUE);
++
++    /* Handle terminal exit */
++    g_signal_connect (self->terminal, "child-exited",
++                      G_CALLBACK (on_terminal_child_exited), self);
++
++    /* Add key press controller for keyboard shortcuts */
++    key_controller = gtk_event_controller_key_new ();
++    g_signal_connect (key_controller, "key-pressed",
++                      G_CALLBACK (terminal_key_press_cb), self);
++    gtk_widget_add_controller (self->terminal, key_controller);
++
++    /* Add click gesture for right-click menu */
++    click_gesture = gtk_gesture_click_new ();
++    gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (click_gesture), 0);
++    g_signal_connect (click_gesture, "pressed",
++                      G_CALLBACK (on_terminal_button_press), self);
++    gtk_widget_add_controller (self->terminal, GTK_EVENT_CONTROLLER (click_gesture));
++
++    /* Add terminal to the box */
++    gtk_box_append (GTK_BOX (self->box), self->terminal);
++    gtk_widget_set_hexpand (self->terminal, TRUE);
++    gtk_widget_set_vexpand (self->terminal, TRUE);
++
++    /* Listen for OSC 7 directory changes */
++    g_signal_connect (self->terminal, "current-directory-uri-changed",
++                      G_CALLBACK (on_terminal_directory_changed), self);
++}
++
++void
++nautilus_terminal_widget_set_visible (NautilusTerminalWidget *self,
++                                      gboolean                visible)
++{
++    g_return_if_fail (NAUTILUS_IS_TERMINAL_WIDGET (self));
++
++    GtkWidget *parent = gtk_widget_get_parent (GTK_WIDGET (self));
++    if (parent != NULL)
++    {
++        gtk_widget_set_visible (parent, visible);
++    }
++}
++
++
++NautilusTerminalWidget *
++nautilus_terminal_widget_new_with_location (GFile *location)
++{
++    NautilusTerminalWidget *self = g_object_new (NAUTILUS_TYPE_TERMINAL_WIDGET, NULL);
++
++    /* Set the location before spawning the terminal */
++    if (location != NULL)
++    {
++        g_set_object (&self->current_location, location);
++    }
++
++    /* Start the terminal AFTER setting the location */
++    spawn_terminal_in_widget (self);
++
++    return self;
++}
++
++void
++nautilus_terminal_widget_set_current_location (NautilusTerminalWidget *self,
++                                               GFile                  *location)
++{
++    g_return_if_fail (NAUTILUS_IS_TERMINAL_WIDGET (self));
++
++    if (g_set_object (&self->current_location, location))
++    {
++        change_directory_in_terminal (self, location);
++        g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_CURRENT_LOCATION]);
++    }
++}
++
++/**
++ * nautilus_terminal_widget_set_maintain_focus:
++ * @self: The #NautilusTerminalWidget
++ * @maintain_focus: Whether to maintain focus in terminal after directory changes
++ *
++ * Controls whether the terminal should maintain focus when directory changes occur.
++ * When set to TRUE, terminal will keep focus after directory changes (good for terminal use).
++ * When set to FALSE, focus will not be affected (good for file manager use).
++ */
++void
++nautilus_terminal_widget_set_maintain_focus (NautilusTerminalWidget *self,
++                                             gboolean                maintain_focus)
++{
++    g_return_if_fail (NAUTILUS_IS_TERMINAL_WIDGET (self));
++    self->maintain_focus = maintain_focus;
++}
++
++/**
++ * nautilus_terminal_widget_release_focus:
++ * @self: a #NautilusTerminalWidget
++ *
++ * Releases focus from the terminal and cancels any pending focus operations.
++ * This is useful to call when the user interacts with other parts of Nautilus
++ * to ensure the terminal doesn't grab focus back.
++ */
++void
++nautilus_terminal_widget_release_focus (NautilusTerminalWidget *self)
++{
++    g_return_if_fail (NAUTILUS_IS_TERMINAL_WIDGET (self));
++
++    /* Cancel any pending focus grab */
++    if (self->focus_timeout_id > 0)
++    {
++        g_source_remove (self->focus_timeout_id);
++        self->focus_timeout_id = 0;
++    }
++
++    /* Set maintain_focus to FALSE */
++    self->maintain_focus = FALSE;
++}
++
++static void
++copy_to_clipboard (GtkWidget   *widget,
++                   VteTerminal *terminal)
++{
++    vte_terminal_copy_clipboard_format (terminal, VTE_FORMAT_TEXT);
++}
++
++static void
++on_copy_activate (GSimpleAction *action,
++                  GVariant      *parameter,
++                  gpointer       user_data)
++{
++    VteTerminal *terminal = VTE_TERMINAL (user_data);
++    copy_to_clipboard (NULL, terminal);
++}
++
++static void
++on_paste_activate (GSimpleAction *action,
++                   GVariant      *parameter,
++                   gpointer       user_data)
++{
++    VteTerminal *terminal = VTE_TERMINAL (user_data);
++    vte_terminal_paste_clipboard (terminal);
++}
++
++static void
++on_select_all_activate (GSimpleAction *action,
++                        GVariant      *parameter,
++                        gpointer       user_data)
++{
++    VteTerminal *terminal = VTE_TERMINAL (user_data);
++    vte_terminal_select_all (terminal);
++}
++
++static GtkWidget *
++create_terminal_popup_menu (NautilusTerminalWidget *self)
++{
++    GtkWidget *menu;
++    GMenu *menu_model;
++    GSimpleActionGroup *action_group;
++
++    /* Create action group for menu actions */
++    action_group = g_simple_action_group_new ();
++
++    /* Create actions for menu items */
++    GSimpleAction *copy_action = g_simple_action_new ("copy", NULL);
++    g_signal_connect (copy_action, "activate", G_CALLBACK (on_copy_activate), self->terminal);
++    g_action_map_add_action (G_ACTION_MAP (action_group), G_ACTION (copy_action));
++    g_object_unref (copy_action);
++
++    GSimpleAction *paste_action = g_simple_action_new ("paste", NULL);
++    g_signal_connect (paste_action, "activate", G_CALLBACK (on_paste_activate), self->terminal);
++    g_action_map_add_action (G_ACTION_MAP (action_group), G_ACTION (paste_action));
++    g_object_unref (paste_action);
++
++    GSimpleAction *select_all_action = g_simple_action_new ("select-all", NULL);
++    g_signal_connect (select_all_action, "activate", G_CALLBACK (on_select_all_activate), self->terminal);
++    g_action_map_add_action (G_ACTION_MAP (action_group), G_ACTION (select_all_action));
++    g_object_unref (select_all_action);
++
++    /* Create menu model */
++    menu_model = g_menu_new ();
++
++    /* Add menu items to the model */
++    g_menu_append (menu_model, _("Copy"), "popup.copy");
++    g_menu_append (menu_model, _("Paste"), "popup.paste");
++    g_menu_append (menu_model, _("Select All"), "popup.select-all");
++
++    /* Create popover menu with the model */
++    menu = gtk_popover_menu_new_from_model (G_MENU_MODEL (menu_model));
++    gtk_widget_set_parent (menu, GTK_WIDGET (self->terminal));
++
++    /* Insert action group */
++    gtk_widget_insert_action_group (menu, "popup", G_ACTION_GROUP (action_group));
++    g_object_unref (action_group);
++
++    g_object_unref (menu_model);
++
++    return menu;
++}
++
++static gboolean
++on_terminal_button_press (GtkGestureClick *gesture,
++                          int              n_press,
++                          double           x,
++                          double           y,
++                          gpointer         user_data)
++{
++    NautilusTerminalWidget *self = NAUTILUS_TERMINAL_WIDGET (user_data);
++    guint button;
++
++    button = gtk_gesture_single_get_current_button (GTK_GESTURE_SINGLE (gesture));
++
++    /* Show context menu on right click */
++    if (button == GDK_BUTTON_SECONDARY && n_press == 1)
++    {
++        GtkWidget *popup = create_terminal_popup_menu (self);
++        gtk_popover_set_position (GTK_POPOVER (popup), GTK_POS_BOTTOM);
++        gtk_popover_set_pointing_to (GTK_POPOVER (popup), &(GdkRectangle){ x, y, 1, 1 });
++        gtk_popover_popup (GTK_POPOVER (popup));
++        return TRUE;
++    }
++
++    return FALSE;
++}
++
++/* Implement the spawn_terminal_in_widget function to fix linker errors */
++void
++spawn_terminal_in_widget (NautilusTerminalWidget *self)
++{
++    VteTerminal *terminal = VTE_TERMINAL (self->terminal);
++    g_auto (GStrv) env = NULL;
++    g_autoptr (GError) error = NULL;
++    const char *shell;
++    char *working_directory = NULL;
++
++    /* Clear the needs_respawn flag */
++    self->needs_respawn = FALSE;
++
++    /* Get the default shell */
++    shell = g_getenv ("SHELL");
++    if (shell == NULL)
++    {
++        shell = "/bin/bash";
++    }
++
++    /* Use current location as working directory if available */
++    if (self->current_location != NULL)
++    {
++        working_directory = g_file_get_path (self->current_location);
++    }
++
++    /* Environment setup */
++    env = g_get_environ ();
++
++    /* OSC7 command to enable directory tracking */
++    const char *osc7_command = "echo -en \"\\033]7;file://$PWD\\007\"";
++
++    /* Check if existing PROMPT_COMMAND already has OSC7 support */
++    const char *existing_prompt_cmd = g_environ_getenv (env, "PROMPT_COMMAND");
++    if (existing_prompt_cmd != NULL)
++    {
++        /* Only add OSC7 support if not already present */
++        if (strstr (existing_prompt_cmd, "\\033]7;file://") == NULL &&
++            strstr (existing_prompt_cmd, "7;file://") == NULL)
++        {
++            /* Append OSC7 support to existing PROMPT_COMMAND */
++            char *new_prompt_cmd = g_strdup_printf ("%s; %s",
++                                                    existing_prompt_cmd,
++                                                    osc7_command);
++            env = g_environ_setenv (env, "PROMPT_COMMAND", new_prompt_cmd, TRUE);
++            g_free (new_prompt_cmd);
++        }
++    }
++    else
++    {
++        /* No existing PROMPT_COMMAND, create it with OSC7 support */
++        env = g_environ_setenv (env, "PROMPT_COMMAND", osc7_command, TRUE);
++    }
++
++
++    /* Start the shell */
++    vte_terminal_spawn_async (terminal,
++                              VTE_PTY_DEFAULT,
++                              working_directory, /* Start in Nautilus's current directory */
++                              (char *[]) { (char *) shell, NULL },
++                              env,          /* environment */
++                              G_SPAWN_SEARCH_PATH,
++                              NULL, NULL,   /* child setup */
++                              NULL,         /* child pid */
++                              -1,           /* timeout */
++                              NULL,         /* cancellable */
++                              NULL,
++                              self);
++
++    g_free (working_directory);
++    /*  print working_directory on terminal to debug */
++    g_message ("Working directory: %s", working_directory ? working_directory : "NULL");
++}
++
++/**
++ * nautilus_terminal_widget_ensure_terminal_focus:
++ * @self: a #NautilusTerminalWidget
++ *
++ * Ensures that the terminal gets focus after location change.
++ * This is useful when a directory change was initiated from the terminal,
++ * to guarantee it retains focus after the Nautilus view changes.
++ */
++void
++nautilus_terminal_widget_ensure_terminal_focus (NautilusTerminalWidget *self)
++{
++    g_return_if_fail (NAUTILUS_IS_TERMINAL_WIDGET (self));
++
++    /* Cancel any pending focus grab first */
++    if (self->focus_timeout_id > 0)
++    {
++        g_source_remove (self->focus_timeout_id);
++        self->focus_timeout_id = 0;
++    }
++
++    /* Set maintain_focus flag to ensure focus is kept */
++    self->maintain_focus = TRUE;
++
++    /* Grab focus with a slightly longer delay to ensure it happens after
++     * any Nautilus view operations are complete */
++    self->focus_timeout_id = g_timeout_add (100, focus_once_and_remove, self->terminal);
++}
++
++/**
++ * nautilus_terminal_widget_get_has_focus:
++ * @self: a #NautilusTerminalWidget
++ *
++ * Checks whether the terminal inside this widget has focus.
++ *
++ * Returns: %TRUE if the terminal has focus, %FALSE otherwise
++ */
++gboolean
++nautilus_terminal_widget_get_has_focus (NautilusTerminalWidget *self)
++{
++    g_return_val_if_fail (NAUTILUS_IS_TERMINAL_WIDGET (self), FALSE);
++
++    if (self->terminal)
++    {
++        return gtk_widget_has_focus (GTK_WIDGET (self->terminal));
++    }
++
++    return FALSE;
++}
+diff --git a/src/nautilus-terminal-widget.h b/src/nautilus-terminal-widget.h
+new file mode 100644
+index 000000000..a85db138c
+--- /dev/null
++++ b/src/nautilus-terminal-widget.h
+@@ -0,0 +1,45 @@
++/*
++ *  Copyright (C) 2025
++ *
++ *  This program is free software; you can redistribute it and/or
++ *  modify it under the terms of the GNU General Public License as
++ *  published by the Free Software Foundation; either version 2 of the
++ *  License, or (at your option) any later version.
++ *
++ *  This program is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ *  General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public
++ *  License along with this program; if not, see <http://www.gnu.org/licenses/>.
++ *
++ *  Author: Bruno Goncalves <biglinux.com.br>
++ */
++
++#pragma once
++
++#include <gtk/gtk.h>
++#include <gio/gio.h>
++
++G_BEGIN_DECLS
++
++#define NAUTILUS_TYPE_TERMINAL_WIDGET (nautilus_terminal_widget_get_type ())
++G_DECLARE_FINAL_TYPE (NautilusTerminalWidget, nautilus_terminal_widget, NAUTILUS, TERMINAL_WIDGET, GtkWidget)
++
++NautilusTerminalWidget *nautilus_terminal_widget_new (void);
++NautilusTerminalWidget *nautilus_terminal_widget_new_with_location (GFile *location);
++void nautilus_terminal_widget_set_current_location (NautilusTerminalWidget *self,
++                                                    GFile                  *location);
++void spawn_terminal_in_widget (NautilusTerminalWidget *self);
++void nautilus_terminal_widget_release_focus (NautilusTerminalWidget *self);
++void nautilus_terminal_widget_ensure_terminal_focus (NautilusTerminalWidget *self);
++void nautilus_terminal_widget_set_maintain_focus (NautilusTerminalWidget *self,
++                                                  gboolean                maintain_focus);
++gboolean nautilus_terminal_widget_get_has_focus (NautilusTerminalWidget *self);
++
++/* Function to set terminal widget visibility and handle respawning */
++void nautilus_terminal_widget_set_visible (NautilusTerminalWidget *self,
++                                           gboolean                visible);
++
++G_END_DECLS
+diff --git a/src/nautilus-window-slot.c b/src/nautilus-window-slot.c
+index 27fbd13fc..370dae1b3 100644
+--- a/src/nautilus-window-slot.c
++++ b/src/nautilus-window-slot.c
+@@ -87,9 +87,13 @@ struct _NautilusWindowSlot
+ 
+     gboolean active : 1;
+     guint loading : 1;
++    gboolean terminal_visible : 1;
+ 
+     GtkWidget *stack;
+     GtkWidget *vbox;
++    GtkWidget *content_box;
++    GtkWidget *terminal_pane;
++    NautilusTerminalWidget *terminal_widget;
+     AdwStatusPage *global_search_page;
+ 
+     GtkWidget *extra_location_widgets;
+@@ -185,6 +189,34 @@ static void nautilus_window_slot_set_viewed_file (NautilusWindowSlot *self,
+ static void nautilus_window_slot_go_up (NautilusWindowSlot *self);
+ static void nautilus_window_slot_go_down (NautilusWindowSlot *self);
+ static void update_back_forward_actions (NautilusWindowSlot *self);
++static void on_terminal_change_directory (NautilusTerminalWidget *widget,
++                                          GFile                  *location,
++                                          NautilusWindowSlot     *self);
++static void on_slot_location_changed_for_terminal (NautilusWindowSlot *self,
++                                                   GParamSpec         *pspec,
++                                                   gpointer            user_data);
++static void on_terminal_toggle_visibility (NautilusTerminalWidget *widget,
++                                           gboolean                visible,
++                                           NautilusWindowSlot     *self);
++
++/* Handler for terminal pane visibility changes */
++static void
++on_terminal_pane_visibility_changed (GtkWidget          *widget,
++                                     GParamSpec         *pspec,
++                                     NautilusWindowSlot *self)
++{
++    /* If the terminal pane became visible */
++    if (gtk_widget_get_visible (widget) && self->terminal_widget)
++    {
++        /* Ensure the terminal gets focus */
++        nautilus_terminal_widget_ensure_terminal_focus (self->terminal_widget);
++    }
++    else
++    {
++        /* Return focus to the content view when terminal is hidden */
++        gtk_widget_grab_focus (GTK_WIDGET (self->content_view));
++    }
++}
+ 
+ void
+ free_navigation_state (gpointer data)
+@@ -888,12 +920,28 @@ nautilus_window_slot_constructed (GObject *object)
+ 
+     G_OBJECT_CLASS (nautilus_window_slot_parent_class)->constructed (object);
+ 
++    /* Create a vertical paned container to hold the content and terminal */
++    GtkWidget *paned = gtk_paned_new (GTK_ORIENTATION_VERTICAL);
++    adw_bin_set_child (ADW_BIN (self), paned);
++
++    /* Create stack for main content and search page */
+     self->stack = gtk_stack_new ();
+-    adw_bin_set_child (ADW_BIN (self), self->stack);
++    gtk_paned_set_start_child (GTK_PANED (paned), self->stack);
++    gtk_widget_set_vexpand (self->stack, TRUE);
+ 
+     self->vbox = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+     gtk_stack_add_child (GTK_STACK (self->stack), self->vbox);
+ 
++    /* The content_box is where we'll put the file view */
++    self->content_box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
++    gtk_box_append (GTK_BOX (self->vbox), self->content_box);
++    gtk_widget_set_vexpand (self->content_box, TRUE);
++
++    /* Terminal pane will be added to the bottom pane and shown on demand with the F4 key */
++    self->terminal_pane = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
++    gtk_paned_set_end_child (GTK_PANED (paned), self->terminal_pane);
++    gtk_widget_set_visible (self->terminal_pane, FALSE);
++
+     extras_vbox = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+     self->extra_location_widgets = extras_vbox;
+     gtk_box_append (GTK_BOX (self->vbox), extras_vbox);
+@@ -1248,6 +1296,93 @@ action_unstar_current_directory (GSimpleAction *action,
+                                        &(GList){ .data = self->viewed_file }, NULL, NULL);
+ }
+ 
++static void
++action_toggle_terminal (GSimpleAction *action,
++                        GVariant      *state,
++                        gpointer       user_data)
++{
++    NautilusWindowSlot *self = NAUTILUS_WINDOW_SLOT (user_data);
++    gboolean terminal_visible = g_variant_get_boolean (state);
++
++    g_simple_action_set_state (action, state);
++
++    self->terminal_visible = terminal_visible;
++
++    /* Create terminal widget if it doesn't exist yet */
++    if (terminal_visible && self->terminal_widget == NULL)
++    {
++        /* Use the constructor with location to ensure the terminal starts in the correct directory */
++        self->terminal_widget = nautilus_terminal_widget_new_with_location (self->location);
++        gtk_box_append (GTK_BOX (self->terminal_pane), GTK_WIDGET (self->terminal_widget));
++        gtk_widget_set_vexpand (GTK_WIDGET (self->terminal_widget), TRUE);
++        gtk_widget_set_hexpand (GTK_WIDGET (self->terminal_widget), TRUE);        /* Connect to the terminal's change-directory signal */
++        g_signal_connect (self->terminal_widget, "change-directory",
++                          G_CALLBACK (on_terminal_change_directory), self);
++
++        /* Connect to the terminal's visibility toggle signal */
++        g_signal_connect (self->terminal_widget, "toggle-visibility",
++                          G_CALLBACK (on_terminal_toggle_visibility), self);
++
++        /* Connect to the slot's location change signal */
++        g_signal_connect (self, "notify::location",
++                          G_CALLBACK (on_slot_location_changed_for_terminal), self);
++
++        /* Connect to visibility changes of the terminal pane to handle focus */
++        g_signal_connect (self->terminal_pane, "notify::visible",
++                          G_CALLBACK (on_terminal_pane_visibility_changed), self);
++    }
++
++    /* Show or hide the terminal */
++    gtk_widget_set_visible (self->terminal_pane, terminal_visible);
++
++    /* Set the initial position of the paned divider when showing the terminal */
++    if (terminal_visible && gtk_widget_get_visible (self->terminal_pane))
++    {
++        GtkWidget *parent = gtk_widget_get_parent (self->terminal_pane);
++
++        if (GTK_IS_PANED (parent))
++        {
++            gtk_paned_set_position (GTK_PANED (parent), -1); /* Let GTK handle initial position */
++        }
++        nautilus_terminal_widget_ensure_terminal_focus (self->terminal_widget);
++    }
++}
++
++static void
++on_terminal_change_directory (NautilusTerminalWidget *widget,
++                              GFile                  *location,
++                              NautilusWindowSlot     *self)
++{
++    gboolean terminal_had_focus = FALSE;
++
++    /* Check if terminal currently has focus before changing location */
++    if (widget)
++    {
++        terminal_had_focus = nautilus_terminal_widget_get_has_focus (widget);
++    }
++
++    /* Only change directory if it's different from the current one */
++    if (location != NULL && self->location != NULL && !g_file_equal (location, self->location))
++    {
++        /* If terminal had focus, make sure it keeps focus after directory change */
++        if (terminal_had_focus)
++        {
++            /* Ensure focus is maintained and will be restored after location change completes */
++            nautilus_terminal_widget_set_maintain_focus (widget, TRUE);
++
++            /* This schedules a focus grab after the location change completes */
++            nautilus_terminal_widget_ensure_terminal_focus (widget);
++        }
++        else
++        {
++            /* If terminal didn't have focus, don't steal it */
++            nautilus_terminal_widget_set_maintain_focus (widget, FALSE);
++        }
++
++        nautilus_window_slot_open_location_full (self, location, 0, NULL);
++    }
++}
++
+ const GActionEntry slot_entries[] =
+ {
+     { .name = "open-location", .activate = action_open_location, .parameter_type = "s" },
+@@ -1272,6 +1407,7 @@ const GActionEntry slot_entries[] =
+     { .name = "unbookmark-current-directory", .activate = action_unbookmark_current_directory },
+     { .name = "star-current-directory", .activate = action_star_current_directory },
+     { .name = "unstar-current-directory", .activate = action_unstar_current_directory },
++    { .name = "toggle-terminal", .state = "false", .change_state = action_toggle_terminal },
+ };
+ 
+ static void
+@@ -1391,6 +1527,7 @@ nautilus_window_slot_init (NautilusWindowSlot *self)
+     ADD_SHORTCUT_FOR_ACTION (self->shortcuts, "slot.up", "<alt>Up");
+     ADD_SHORTCUT_FOR_ACTION (self->shortcuts, "slot.down", "<alt>Down");
+     ADD_SHORTCUT_FOR_ACTION (self->shortcuts, "slot.bookmark-current-directory", "<control>d|AddFavorite");
++    ADD_SHORTCUT_FOR_ACTION (self->shortcuts, "slot.toggle-terminal", "F4");
+ 
+ #undef ADD_SHORTCUT_FOR_ACTION
+ #undef ADD_SHORTCUT_FOR_ACTION_WITH_ARGS
+@@ -2098,7 +2235,7 @@ got_file_info_for_view_selection_callback (NautilusFile *file,
+         g_assert (self->pending_location != NULL);
+ 
+         /* Setting the view location might trigger a signal that calls
+-         * into the slot. We don't want that when setting the location
++         +        * into the slot. We don't want that when setting the location
+          * outselves from the slot */
+         g_object_freeze_notify (G_OBJECT (self->content_view));
+ 
+@@ -2125,7 +2262,6 @@ got_file_info_for_view_selection_callback (NautilusFile *file,
+              *
+              * But guard against the case that $HOME cannot be displayed either,
+              * otherwise we would enter an infinite loop. */
+-
+             if (!nautilus_is_home_directory (location))
+             {
+                 nautilus_window_slot_go_home (self, FALSE);
+@@ -2213,7 +2349,7 @@ free_location_change (NautilusWindowSlot *self)
+ {
+     g_clear_object (&self->pending_location);
+     g_clear_object (&self->pending_file_to_activate);
+-    nautilus_file_list_free (self->pending_selection);
++    g_clear_pointer (&self->pending_selection, nautilus_file_list_free);
+     self->pending_selection = NULL;
+ 
+     if (self->mount_cancellable != NULL)
+@@ -2751,7 +2887,8 @@ create_and_bind_new_content_view (NautilusWindowSlot *self,
+     self->content_view = NAUTILUS_VIEW (nautilus_files_view_new (view_id, self));
+ 
+     GtkWidget *widget = GTK_WIDGET (self->content_view);
+-    gtk_box_append (GTK_BOX (self->vbox), widget);
++    gtk_box_append (GTK_BOX (self->content_box), widget);
++    gtk_box_reorder_child_after (GTK_BOX (self->content_box), widget, NULL);
+     gtk_widget_set_vexpand (widget, TRUE);
+ 
+     g_signal_connect_object (self->content_view, "notify::loading",
+@@ -3347,3 +3484,52 @@ nautilus_window_slot_go_down (NautilusWindowSlot *self)
+     down_list = g_list_delete_link (down_list, down_list);
+     self->down_list = g_steal_pointer (&down_list);
+ }
++
++static void
++on_slot_location_changed_for_terminal (NautilusWindowSlot *self,
++                                       GParamSpec         *pspec,
++                                       gpointer            user_data)
++{
++    /* Update the terminal location when Nautilus changes directories */
++    if (self->terminal_widget != NULL && self->terminal_visible && self->location != NULL)
++    {
++        gboolean terminal_had_focus = FALSE;
++
++        /* Check if terminal currently has focus before changing location */
++        if (self->terminal_widget)
++        {
++            terminal_had_focus = nautilus_terminal_widget_get_has_focus (self->terminal_widget);
++        }
++
++        /* First update the location */
++        nautilus_terminal_widget_set_current_location (self->terminal_widget, self->location);
++
++        /* Then handle focus based on what had focus before the change */
++        if (terminal_had_focus)
++        {
++            /* If terminal had focus before the location change, make sure it gets it back */
++            nautilus_terminal_widget_ensure_terminal_focus (self->terminal_widget);
++        }
++        else
++        {
++            /* If terminal didn't have focus, don't steal it */
++            nautilus_terminal_widget_release_focus (self->terminal_widget);
++        }
++    }
++}
++
++static void
++on_terminal_toggle_visibility (NautilusTerminalWidget *widget,
++                               gboolean                visible,
++                               NautilusWindowSlot     *self)
++{
++    /* Update the terminal visibility state in the slot */
++    self->terminal_visible = visible;
++
++    /* Update the action state to maintain consistency */
++    GAction *action = g_action_map_lookup_action (G_ACTION_MAP (self->slot_action_group), "toggle-terminal");
++    if (action != NULL)
++    {
++        g_action_change_state (action, g_variant_new_boolean (visible));
++    }
++}
+diff --git a/src/nautilus-window-slot.h b/src/nautilus-window-slot.h
+index 7c494ec36..e7d1414a9 100644
+--- a/src/nautilus-window-slot.h
++++ b/src/nautilus-window-slot.h
+@@ -1,23 +1,23 @@
+ /*
+-   nautilus-window-slot.h: Nautilus window slot
+-
+-   Copyright (C) 2008 Free Software Foundation, Inc.
+-
+-   This program is free software; you can redistribute it and/or
+-   modify it under the terms of the GNU General Public License as
+-   published by the Free Software Foundation; either version 2 of the
+-   License, or (at your option) any later version.
+-
+-   This program is distributed in the hope that it will be useful,
+-   but WITHOUT ANY WARRANTY; without even the implied warranty of
+-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+-   General Public License for more details.
+-
+-   You should have received a copy of the GNU General Public
+-   License along with this program; if not, see <http://www.gnu.org/licenses/>.
+-
+-   Author: Christian Neumair <cneumair@gnome.org>
+-*/
++ *  nautilus-window-slot.h: Nautilus window slot
++ *
++ *  Copyright (C) 2008 Free Software Foundation, Inc.
++ *
++ *  This program is free software; you can redistribute it and/or
++ *  modify it under the terms of the GNU General Public License as
++ *  published by the Free Software Foundation; either version 2 of the
++ *  License, or (at your option) any later version.
++ *
++ *  This program is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ *  General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public
++ *  License along with this program; if not, see <http://www.gnu.org/licenses/>.
++ *
++ *  Author: Christian Neumair <cneumair@gnome.org>
++ */
+ 
+ #pragma once
+ 
+@@ -27,12 +27,14 @@
+ #include <adwaita.h>
+ 
+ #include "nautilus-types.h"
++#include "nautilus-terminal-widget.h"
+ 
+-typedef enum {
+-	NAUTILUS_LOCATION_CHANGE_STANDARD,
+-	NAUTILUS_LOCATION_CHANGE_BACK,
+-	NAUTILUS_LOCATION_CHANGE_FORWARD,
+-	NAUTILUS_LOCATION_CHANGE_RELOAD
++typedef enum
++{
++    NAUTILUS_LOCATION_CHANGE_STANDARD,
++    NAUTILUS_LOCATION_CHANGE_BACK,
++    NAUTILUS_LOCATION_CHANGE_FORWARD,
++    NAUTILUS_LOCATION_CHANGE_RELOAD
+ } NautilusLocationChangeType;
+ 
+ #define NAUTILUS_TYPE_WINDOW_SLOT (nautilus_window_slot_get_type ())
+@@ -46,79 +48,79 @@ typedef struct
+     NautilusQuery *current_search_query;
+ } NautilusNavigationState;
+ 
+-NautilusWindowSlot * nautilus_window_slot_new              (NautilusMode        mode);
++NautilusWindowSlot * nautilus_window_slot_new (NautilusMode mode);
+ 
+-void nautilus_window_slot_open_location_full               (NautilusWindowSlot *slot,
+-                                                            GFile              *location,
+-                                                            NautilusOpenFlags   flags,
+-                                                            GList              *new_selection);
++void nautilus_window_slot_open_location_full (NautilusWindowSlot *slot,
++                                              GFile              *location,
++                                              NautilusOpenFlags   flags,
++                                              GList              *new_selection);
+ 
+-GtkFilter *nautilus_window_slot_get_filter                 (NautilusWindowSlot *slot);
+-void nautilus_window_slot_set_filter                       (NautilusWindowSlot *slot,
+-                                                            GtkFilter          *filter);
+-NautilusMode nautilus_window_slot_get_mode                 (NautilusWindowSlot *slot);
+-GFile * nautilus_window_slot_get_location		   (NautilusWindowSlot *slot);
+-GFile * nautilus_window_slot_get_pending_location          (NautilusWindowSlot *slot);
++GtkFilter *nautilus_window_slot_get_filter (NautilusWindowSlot *slot);
++void nautilus_window_slot_set_filter (NautilusWindowSlot *slot,
++                                      GtkFilter          *filter);
++NautilusMode nautilus_window_slot_get_mode (NautilusWindowSlot *slot);
++GFile * nautilus_window_slot_get_location (NautilusWindowSlot *slot);
++GFile * nautilus_window_slot_get_pending_location (NautilusWindowSlot *slot);
+ 
+-NautilusBookmark *nautilus_window_slot_get_bookmark        (NautilusWindowSlot *slot);
++NautilusBookmark *nautilus_window_slot_get_bookmark (NautilusWindowSlot *slot);
+ 
+-GList * nautilus_window_slot_get_back_history              (NautilusWindowSlot *slot);
+-GList * nautilus_window_slot_get_forward_history           (NautilusWindowSlot *slot);
++GList * nautilus_window_slot_get_back_history (NautilusWindowSlot *slot);
++GList * nautilus_window_slot_get_forward_history (NautilusWindowSlot *slot);
+ 
+-gboolean nautilus_window_slot_get_allow_stop               (NautilusWindowSlot *slot);
+-void     nautilus_window_slot_set_allow_stop		   (NautilusWindowSlot *slot,
+-							    gboolean	        allow_stop);
+-void     nautilus_window_slot_stop_loading                 (NautilusWindowSlot *slot);
++gboolean nautilus_window_slot_get_allow_stop (NautilusWindowSlot *slot);
++void     nautilus_window_slot_set_allow_stop (NautilusWindowSlot *slot,
++                                              gboolean            allow_stop);
++void     nautilus_window_slot_stop_loading (NautilusWindowSlot *slot);
+ 
+-const gchar *nautilus_window_slot_get_title                (NautilusWindowSlot *slot);
+-void         nautilus_window_slot_update_title		   (NautilusWindowSlot *slot);
++const gchar *nautilus_window_slot_get_title (NautilusWindowSlot *slot);
++void         nautilus_window_slot_update_title (NautilusWindowSlot *slot);
+ 
+-gboolean nautilus_window_slot_handle_activate_files        (NautilusWindowSlot *slot,
+-                                                            GList              *files);
+-gboolean nautilus_window_slot_handle_event       	   (NautilusWindowSlot    *slot,
+-							    GtkEventControllerKey *controller,
+-							    guint                  keyval,
+-							    GdkModifierType        state);
++gboolean nautilus_window_slot_handle_activate_files (NautilusWindowSlot *slot,
++                                                     GList              *files);
++gboolean nautilus_window_slot_handle_event (NautilusWindowSlot    *slot,
++                                            GtkEventControllerKey *controller,
++                                            guint                  keyval,
++                                            GdkModifierType        state);
+ 
+-void    nautilus_window_slot_queue_reload		   (NautilusWindowSlot *slot);
++void    nautilus_window_slot_queue_reload (NautilusWindowSlot *slot);
+ 
+-const gchar*   nautilus_window_slot_get_icon_name                (NautilusWindowSlot *slot);
++const gchar *   nautilus_window_slot_get_icon_name (NautilusWindowSlot *slot);
+ 
+-const gchar*   nautilus_window_slot_get_tooltip                  (NautilusWindowSlot *slot);
++const gchar *   nautilus_window_slot_get_tooltip (NautilusWindowSlot *slot);
+ 
+ NautilusToolbarMenuSections * nautilus_window_slot_get_toolbar_menu_sections (NautilusWindowSlot *slot);
+ 
+-GMenuModel* nautilus_window_slot_get_templates_menu (NautilusWindowSlot *self);
++GMenuModel * nautilus_window_slot_get_templates_menu (NautilusWindowSlot *self);
+ 
+-GMenuModel* nautilus_window_slot_get_extensions_background_menu (NautilusWindowSlot *self);
++GMenuModel * nautilus_window_slot_get_extensions_background_menu (NautilusWindowSlot *self);
+ 
+-gboolean nautilus_window_slot_get_active                   (NautilusWindowSlot *slot);
++gboolean nautilus_window_slot_get_active (NautilusWindowSlot *slot);
+ 
+-void     nautilus_window_slot_set_active                   (NautilusWindowSlot *slot,
+-                                                            gboolean            active);
+-gboolean nautilus_window_slot_get_loading                  (NautilusWindowSlot *slot);
++void     nautilus_window_slot_set_active (NautilusWindowSlot *slot,
++                                          gboolean            active);
++gboolean nautilus_window_slot_get_loading (NautilusWindowSlot *slot);
+ 
+-gboolean nautilus_window_slot_get_search_visible           (NautilusWindowSlot *slot);
++gboolean nautilus_window_slot_get_search_visible (NautilusWindowSlot *slot);
+ 
+-gboolean nautilus_window_slot_get_search_global            (NautilusWindowSlot *self);
++gboolean nautilus_window_slot_get_search_global (NautilusWindowSlot *self);
+ 
+-GList* nautilus_window_slot_get_selection                  (NautilusWindowSlot *slot);
++GList * nautilus_window_slot_get_selection (NautilusWindowSlot *slot);
+ 
+-void     nautilus_window_slot_search                       (NautilusWindowSlot *slot,
+-                                                            NautilusQuery      *query);
++void     nautilus_window_slot_search (NautilusWindowSlot *slot,
++                                      NautilusQuery      *query);
+ 
+ void nautilus_window_slot_restore_navigation_state (NautilusWindowSlot      *self,
+                                                     NautilusNavigationState *data);
+ 
+-NautilusNavigationState* nautilus_window_slot_get_navigation_state (NautilusWindowSlot *self);
++NautilusNavigationState * nautilus_window_slot_get_navigation_state (NautilusWindowSlot *self);
+ 
+ NautilusQueryEditor *nautilus_window_slot_get_query_editor (NautilusWindowSlot *self);
+ 
+ /* Only used by slot-dnd */
+-NautilusView*  nautilus_window_slot_get_current_view       (NautilusWindowSlot *slot);
++NautilusView *  nautilus_window_slot_get_current_view (NautilusWindowSlot *slot);
+ 
+-void nautilus_window_slot_back_or_forward                  (NautilusWindowSlot *slot,
+-                                                            gboolean            back,
+-                                                            guint               distance);
++void nautilus_window_slot_back_or_forward (NautilusWindowSlot *slot,
++                                           gboolean            back,
++                                           guint               distance);
+ 
+-void free_navigation_state                                 (gpointer data);
++void free_navigation_state (gpointer data);
+-- 
+2.49.0
+
