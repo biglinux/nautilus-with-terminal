@@ -16,7 +16,7 @@ I created this patch as a personal challenge to see if I could do it—Nautilus 
 
 ## Repository Contents
 
-- `0001-*.patch` – The patch file to be applied to Nautilus.
+- `000*.patch` – The patch file to be applied to Nautilus.
 - `PKGBUILD` – The build script to generate the package for Arch Linux or compatible distributions.
 
 The full source code can be found at:  
