@@ -103,7 +103,6 @@ _pick() {
 }
 
 package() {
-  depends+=(libnautilus-extension.so)
   groups=(gnome)
 
   meson install -C build --destdir "$pkgdir"
