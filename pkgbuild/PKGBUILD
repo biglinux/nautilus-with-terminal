@@ -9,7 +9,7 @@
 pkgbase=nautilus-with-terminal
 pkgname=nautilus-with-terminal
 pkgver=48.2
-pkgrel=2
+pkgrel=3
 conflicts=('nautilus' 'libnautilus-extension')
 provides=('nautilus' 'libnautilus-extension' 'libnautilus-extension.so=4-64')
 replaces=('nautilus' 'libnautilus-extension')  # CRUCIAL for automatic upgrade
@@ -55,7 +55,7 @@ makedepends=(
 )
 checkdepends=(python-gobject)
 source=(
-  "git+https://gitlab.gnome.org/GNOME/nautilus.git"
+  "git+https://gitlab.gnome.org/GNOME/nautilus.git#tag=${pkgver}"
   0001-Disable-tracker-test.patch
   0002-Embedded-terminal.patch
 )
