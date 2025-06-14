@@ -3,16 +3,17 @@
 # Maintainer: Jan Alexander Steffens (heftig) <heftig@archlinux.org>
 # Contributor: Jan de Groot <jgc@archlinux.org>
 
-# This version modified for add Terminal
+# This version modified to add embedded terminal support
 # Maintainer: Bruno Goncalves <biglinux.com.br>
 
 pkgbase=nautilus-with-terminal
 pkgname=nautilus-with-terminal
-pkgver=48.1
-pkgrel=6
+pkgver=48.2
+pkgrel=3
 conflicts=('nautilus' 'libnautilus-extension')
-provides=('nautilus' 'libnautilus-extension')
-pkgdesc="Default file manager for GNOME (Remember on 49 version stop use git)"
+provides=('nautilus' 'libnautilus-extension' 'libnautilus-extension.so=4-64')
+replaces=('nautilus' 'libnautilus-extension')  # CRUCIAL for automatic upgrade
+pkgdesc="Default file manager for GNOME with embedded terminal"
 url="https://apps.gnome.org/Nautilus/"
 arch=(x86_64)
 license=(GPL-3.0-or-later)
@@ -54,19 +55,13 @@ makedepends=(
 )
 checkdepends=(python-gobject)
 source=(
-#   "git+https://gitlab.gnome.org/GNOME/nautilus.git#tag=${pkgver/[a-z]/.&}"
-  "git+https://gitlab.gnome.org/GNOME/nautilus.git"
+  "git+https://gitlab.gnome.org/GNOME/nautilus.git#tag=${pkgver}"
   0001-Disable-tracker-test.patch
   0002-Embedded-terminal.patch
 )
 b2sums=('SKIP'
         'b70c17cc83308e25fa1d5fcc0c735f82ba641fa6f78a064c5b01d65fa5b45505d23247528e2d97254a6983e939e3e9e1b1a737f3aab2546e5ecc825f954d9dcc'
         '46e3db153a926a07ed702ad6769abfef20032b98fc9f5c2b5c4d039f4bfefc423a51b25e6ed13a2005d8b8066d7e922ae59e27347a2f39c08f3a1ce3884fa596')
-validpgpkeys=(
-  6B211753AC950672287226800538577822AE4B17 # António Fernandes <antoniof@gnome.org>
-  550660707A6F40376B9B9F8D504A78811E6160CC # Corey Berla <corey@berla.me>
-  SKIP
-)
 
 prepare() {
   cd nautilus
@@ -74,7 +69,7 @@ prepare() {
   # Tracker test is broken in our build containers
   git apply -3 ../0001-Disable-tracker-test.patch
 
-  # Add embedded terminal, open using F4 key
+  # Add embedded terminal, opened using the F4 key
   git apply --3way --union ../0002-Embedded-terminal.patch
 }
 
@@ -88,51 +83,30 @@ build() {
   meson compile -C build
 }
 
-# check() {
-#   meson test -C build --print-errorlogs
-# }
-
-_pick() {
-  local p="$1" f d; shift
-  for f; do
-    d="$srcdir/$p/${f#$pkgdir/}"
-    mkdir -p "$(dirname "$d")"
-    mv "$f" "$d"
-    rmdir -p --ignore-fail-on-non-empty "$(dirname "$f")"
-  done
-}
-
 package() {
   groups=(gnome)
 
   meson install -C build --destdir "$pkgdir"
-
-#   cd "$pkgdir"
-
-#   _pick libne usr/include
-#   _pick libne usr/lib/{girepository-1.0,libnautilus-extension*,pkgconfig}
-#   _pick libne usr/share/gir-1.0
-
-#   _pick ldocs usr/share/doc
-}
-
-package_libnautilus-extension() {
-  pkgdesc="Extension interface for Nautilus"
-  depends=(
-    gcc-libs
-    glib2
-    glibc
+  
+  # Check if all critical libraries are present
+  local required_files=(
+    "usr/lib/libnautilus-extension.so.4"
+    "usr/lib/girepository-1.0/Nautilus-4.0.typelib"
+    "usr/include/nautilus/libnautilus-extension"
   )
-  provides=(libnautilus-extension.so)
-
-  mv libne/* "$pkgdir"
-}
-
-package_libnautilus-extension-docs() {
-  pkgdesc="Extension interface for Nautilus (documentation)"
-  depends=()
-
-  mv ldocs/* "$pkgdir"
+  
+  for file in "${required_files[@]}"; do
+    if [[ ! -e "$pkgdir/$file" ]]; then
+      error "Critical file not found: $file"
+      error "This may break dependent packages like seahorse-nautilus"
+      return 1
+    fi
+  done
+  
+  # Debug log during build
+  msg2 "Installed libnautilus-extension files:"
+  find "$pkgdir" -name "*nautilus-extension*" -type f | head -10
 }
 
 # vim:set sw=2 sts=-1 et:
+
