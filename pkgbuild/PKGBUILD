@@ -46,6 +46,7 @@ depends=(
 )
 makedepends=(
   appstream
+  vte4
   gi-docgen
   git
   glib2-devel
