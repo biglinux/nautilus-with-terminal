@@ -40,7 +40,6 @@ depends=(
   libx11
   localsearch
   pango
-  vte4
   tinysparql
   vte4
   wayland
@@ -57,18 +56,15 @@ makedepends=(
 checkdepends=(python-gobject)
 source=(
   "git+https://gitlab.gnome.org/GNOME/nautilus.git#tag=${pkgver}"
-  0001-Disable-tracker-test.patch
   0002-Embedded-terminal.patch
 )
-b2sums=('SKIP'
-        'b70c17cc83308e25fa1d5fcc0c735f82ba641fa6f78a064c5b01d65fa5b45505d23247528e2d97254a6983e939e3e9e1b1a737f3aab2546e5ecc825f954d9dcc'
-        '8e414d0a12ee124ca219614cd104d49ecb023772bb919f5deb106897c39082533d6e5bdfff10b27c815137b934a903c953aeb42ae9339a7210aa2f74d8a2b465')
+b2sums=(
+        'SKIP'
+        '8bbb320b9720d74fca28a96e4fb92a419be1e3d687264b95e72a7af13eaa7d8ee018f702e754f773a31a12a74bfa0c77a16cdf5f98af84c92f1d73e7f0aad8f0'
+)
 
 prepare() {
   cd nautilus
-
-  # Tracker test is broken in our build containers
-  git apply -3 ../0001-Disable-tracker-test.patch
 
   # Add embedded terminal, opened using the F4 key
   git apply --3way ../0002-Embedded-terminal.patch
