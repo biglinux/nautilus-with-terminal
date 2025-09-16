@@ -56,18 +56,18 @@ makedepends=(
 checkdepends=(python-gobject)
 source=(
   "git+https://gitlab.gnome.org/GNOME/nautilus.git#tag=${pkgver}"
-  0002-Embedded-terminal.patch
+  0002-bigbruno-all-modifications.patch
 )
 b2sums=(
         'SKIP'
-        '8bbb320b9720d74fca28a96e4fb92a419be1e3d687264b95e72a7af13eaa7d8ee018f702e754f773a31a12a74bfa0c77a16cdf5f98af84c92f1d73e7f0aad8f0'
+        '0cea65f40ca0e0b835f1153504a52afd6d5fa2c4b5032bb7c3a34fa808b1ed9334ed21626739a3cb1834b0260f6905f271cd1e137d069969787c247ebd722391'
 )
 
 prepare() {
   cd nautilus
 
-  # Add embedded terminal, opened using the F4 key
-  git apply --3way ../0002-Embedded-terminal.patch
+  # Apply ALL bigbruno's modifications (terminal + other enhancements)
+  git apply --3way ../0002-bigbruno-all-modifications.patch
 }
 
 build() {
@@ -99,10 +99,6 @@ package() {
       return 1
     fi
   done
-  
-  # Debug log during build
-  msg2 "Installed libnautilus-extension files:"
-  find "$pkgdir" -name "*nautilus-extension*" -type f | head -10
 }
 
 # vim:set sw=2 sts=-1 et:
