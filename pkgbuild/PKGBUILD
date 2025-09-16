@@ -5,15 +5,16 @@
 
 # This version modified to add embedded terminal support
 # Maintainer: Bruno Goncalves <biglinux.com.br>
+# Maintainer: Tales A. Mendonça <communitybig.org>
 
 pkgbase=nautilus-with-terminal
 pkgname=nautilus-with-terminal
 pkgver=49.0
 pkgrel=1
-conflicts=('nautilus' 'libnautilus-extension')
-provides=('nautilus' 'libnautilus-extension' 'libnautilus-extension.so=4-64')
-replaces=('nautilus' 'libnautilus-extension')
-pkgdesc="Default file manager for GNOME with embedded terminal"
+conflicts=('nautilus')
+provides=('nautilus')
+replaces=('nautilus')
+pkgdesc="Default file manager for GNOME - with embedded terminal support"
 url="https://apps.gnome.org/Nautilus/"
 arch=(x86_64)
 license=(GPL-3.0-or-later)
@@ -40,13 +41,14 @@ depends=(
   libx11
   localsearch
   pango
-  tinysparql
   vte4
+  tinysparql
   wayland
   xdg-user-dirs-gtk
 )
 makedepends=(
   appstream
+  vte4
   gi-docgen
   git
   glib2-devel
@@ -55,19 +57,12 @@ makedepends=(
 )
 checkdepends=(python-gobject)
 source=(
-  "git+https://gitlab.gnome.org/GNOME/nautilus.git#tag=${pkgver}"
-  0002-bigbruno-all-modifications.patch
+  "git+https://gitlab.gnome.org/talesam/nautilus.git#branch=terminal-feature"
 )
-b2sums=(
-        'SKIP'
-        'a67154974aa978f03283968443802a0edcb53129293858fa00da707d438c8f401735573b2e369ba711cfbb69cbfd6464ad1b6d8af3d06963a965eabf83347dc9'
-)
+b2sums=('SKIP')
 
 prepare() {
   cd nautilus
-
-  # Apply ALL bigbruno's modifications (terminal + other enhancements)
-  git apply --3way ../0002-bigbruno-all-modifications.patch
 }
 
 build() {
@@ -80,25 +75,52 @@ build() {
   meson compile -C build
 }
 
-package() {
+# check() {
+#   meson test -C build --print-errorlogs
+# }
+
+_pick() {
+  local p="$1" f d; shift
+  for f; do
+    d="$srcdir/$p/${f#$pkgdir/}"
+    mkdir -p "$(dirname "$d")"
+    mv "$f" "$d"
+    rmdir -p --ignore-fail-on-non-empty "$(dirname "$f")"
+  done
+}
+
+package_nautilus-with-terminal() {
+  depends+=(libnautilus-extension.so)
   groups=(gnome)
 
   meson install -C build --destdir "$pkgdir"
-  
-  # Check if all critical libraries are present
-  local required_files=(
-    "usr/lib/libnautilus-extension.so.4"
-    "usr/lib/girepository-1.0/Nautilus-4.0.typelib"
-    "usr/include/nautilus/libnautilus-extension"
+
+  cd "$pkgdir"
+
+  _pick libne usr/include
+  _pick libne usr/lib/{girepository-1.0,libnautilus-extension*,pkgconfig}
+  _pick libne usr/share/gir-1.0
+
+  _pick ldocs usr/share/doc
+}
+
+package_libnautilus-extension() {
+  pkgdesc="Extension interface for Nautilus"
+  depends=(
+    gcc-libs
+    glib2
+    glibc
   )
-  
-  for file in "${required_files[@]}"; do
-    if [[ ! -e "$pkgdir/$file" ]]; then
-      error "Critical file not found: $file"
-      error "This may break dependent packages like seahorse-nautilus"
-      return 1
-    fi
-  done
+  provides=(libnautilus-extension.so)
+
+  mv libne/* "$pkgdir"
+}
+
+package_libnautilus-extension-docs() {
+  pkgdesc="Extension interface for Nautilus (documentation)"
+  depends=()
+
+  mv ldocs/* "$pkgdir"
 }
 
 # vim:set sw=2 sts=-1 et:
