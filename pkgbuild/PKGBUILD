@@ -8,8 +8,8 @@
 
 pkgbase=nautilus-with-terminal
 pkgname=nautilus-with-terminal
-pkgver=48.3
-pkgrel=2
+pkgver=49.0
+pkgrel=0
 conflicts=('nautilus')
 provides=('nautilus')
 replaces=('nautilus')
@@ -55,7 +55,7 @@ makedepends=(
 )
 checkdepends=(python-gobject)
 source=(
-  "git+https://gitlab.gnome.org/bigbruno/nautilus.git#branch=embedded_terminal"
+  "git+https://gitlab.gnome.org/bigbruno/nautilus.git#branch=${pkgver}_embedded_terminal"
 )
 b2sums=('SKIP')
 
