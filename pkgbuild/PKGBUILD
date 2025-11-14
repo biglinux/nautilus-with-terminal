@@ -5,15 +5,25 @@
 
 # This version modified to add embedded terminal support
 # Maintainer: Bruno Goncalves <biglinux.com.br>
+# Maintainer: Tales A. Mendonça <communitybig.org>
 
 pkgbase=nautilus-with-terminal
 pkgname=nautilus-with-terminal
+<<<<<<< Updated upstream
 pkgver=49.0
+<<<<<<< Updated upstream
+pkgrel=1
+=======
 pkgrel=0
+=======
+pkgver=49.1
+pkgrel=1
+>>>>>>> Stashed changes
+>>>>>>> Stashed changes
 conflicts=('nautilus')
 provides=('nautilus')
 replaces=('nautilus')
-pkgdesc="Default file manager for GNOME"
+pkgdesc="Default file manager for GNOME - with embedded terminal support"
 url="https://apps.gnome.org/Nautilus/"
 arch=(x86_64)
 license=(GPL-3.0-or-later)
@@ -40,6 +50,7 @@ depends=(
   libx11
   localsearch
   pango
+  vte4
   tinysparql
   wayland
   xdg-user-dirs-gtk
@@ -55,7 +66,15 @@ makedepends=(
 )
 checkdepends=(python-gobject)
 source=(
+<<<<<<< Updated upstream
+  "git+https://gitlab.gnome.org/talesam/nautilus.git#branch=terminal-feature"
+=======
+<<<<<<< Updated upstream
   "git+https://gitlab.gnome.org/bigbruno/nautilus.git#branch=${pkgver}_embedded_terminal"
+=======
+  "git+https://gitlab.gnome.org/talesam/nautilus.git#branch=main"
+>>>>>>> Stashed changes
+>>>>>>> Stashed changes
 )
 b2sums=('SKIP')
 
